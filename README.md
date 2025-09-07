@@ -8,13 +8,11 @@
 
 Ruby 3.2以上が必要です。
 
-Rubygems公開後:
-
 ```bash
 bundle add kanji-translator
 ```
 
-未公開期間にGitHubから使う場合:
+GitHubから使う場合（任意）:
 
 ```ruby
 # Gemfile
@@ -51,15 +49,20 @@ require "kanji/translator/core_ext/string"
   - ひらがな読みをカタカナに変換して返します。
 - `Kanji::Translator.to_roma(text, **opts)`
   - 簡易ヘボン式のローマ字（ASCII、小文字）で返します。拗音/促音（ゃゅょ/っ）に対応。長音記号「ー」は無視します（例: おう→ou）。
-- `Kanji::Translator.to_slug(text, separator: "-", downcase: true, collapse: true, **opts)`
+- `Kanji::Translator.to_slug(text, separator: "-", downcase: true, collapse: true, segmenter: :tiny, **opts)`
   - `to_roma` の結果をスラッグ化します。
     - 非英数字を `separator` に置換、連続区切りを圧縮、前後の区切りをトリムします。
+   - `segmenter: :tiny`（デフォルト）: TinySegmenter で分かち、語ごとにハイフン区切り（例: "学校案内" → "gakkou-annai"）。
+   - `segmenter: :space`: 空白でのみ分割（例: "学校 案内" → "gakkou-annai"）。
+   - `segmenter: nil`: 分かちなし（語の自動区切りなし）。
 
 例（オプション）:
 
 ```ruby
 Kanji::Translator.to_hira("漢字", timeout: 3, retries: 1)
 Kanji::Translator.to_slug("東京タワー 2010") #=> "toukyou-tawa-2010"
+Kanji::Translator.to_slug("学校 案内", segmenter: :space) #=> "gakkou-annai"
+Kanji::Translator.to_slug("学校案内", segmenter: nil) #=> "gakkouannai"
 Kanji::Translator.to_slug("Foo Bar", separator: "_") #=> "foo_bar"
 ```
 

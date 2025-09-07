@@ -3,9 +3,14 @@
 
 require "bundler/setup"
 require "kanji/translator"
+require "kanji/translator/core_ext/string"
 
 # You can add fixtures and/or initialization code here to make experimenting
 # with your gem easier. You can also use a different console, if you like.
+
+puts "Kanji::Translator console loaded!"
+puts "Try: '漢字'.to_hira or Kanji::Translator.to_slug('学校案内')"
+puts ""
 
 require "irb"
 IRB.start(__FILE__)

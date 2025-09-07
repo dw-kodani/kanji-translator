@@ -31,10 +31,28 @@ module Kanji
       hiragana_to_romaji(hira)
     end
 
-    def self.to_slug(text, separator: "-", downcase: true, collapse: true, **)
-      roma = to_roma(text, **)
-      s = downcase ? roma.downcase : roma.dup
-      sep = separator
+    def self.to_slug(text, **opts)
+      sep       = opts.fetch(:separator, "-")
+      downcase  = opts.fetch(:downcase, true)
+      collapse  = opts.fetch(:collapse, true)
+      segmenter = opts.fetch(:segmenter, :tiny)
+      net_opts  = slice_opts(opts, :timeout, :retries, :backoff, :user_agent)
+
+      s = case segmenter
+          when :tiny
+            tokens = segment_with_tiny(text)
+            parts = tokens.filter_map { |tok| normalize_slug_part(tok, net_opts) }
+            parts.join(sep)
+          when :space
+            tokens = segment_with_space(text)
+            parts = tokens.filter_map { |tok| normalize_slug_part(tok, net_opts) }
+            parts.join(sep)
+          else
+            roma = to_roma(text, **net_opts)
+            roma.dup
+          end
+
+      s = s.downcase if downcase
       # Replace non-alphanumeric with separator
       s = s.gsub(/[^a-z0-9]+/, sep)
       # Collapse duplicate separators
@@ -192,6 +210,34 @@ module Kanji
       sleep_s = base * (2**(attempt - 1))
       jitter = rand * 0.05
       sleep_s + jitter
+    end
+
+    def self.segment_with_tiny(text)
+      require "tiny_segmenter"
+      TinySegmenter.new.segment(text)
+    rescue LoadError
+      raise Error, "tiny_segmenter gem is not installed. Add `tiny_segmenter` or omit segmenter option."
+    end
+
+    def self.japanese_token?(tok)
+      # Kanji, Kana, prolonged sound mark, iteration marks, small kana
+      !!(tok =~ /[一-龯々〆ヵヶぁ-ゖゝゞァ-ヴー]/)
+    end
+
+    def self.segment_with_space(text)
+      text.split(/\s+/)
+    end
+
+    def self.normalize_slug_part(tok, net_opts)
+      if japanese_token?(tok)
+        to_roma(tok, **net_opts)
+      elsif tok =~ /[A-Za-z0-9]+/
+        tok
+      end
+    end
+
+    def self.slice_opts(hash, *keys)
+      hash.slice(*keys)
     end
   end
 end

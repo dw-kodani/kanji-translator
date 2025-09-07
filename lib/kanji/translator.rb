@@ -13,12 +13,26 @@ module Kanji
 
     USER_AGENT = "kanji-translator/#{VERSION}".freeze
     HOST = "yomikatawa.com"
+    ASCII_RE = /[A-Za-z0-9]/
+    SPACE_RE = /[\s\u3000]/ # ASCII whitespace or IDEOGRAPHIC SPACE
+    NON_ALNUM_RE = /[^a-z0-9]+/
+    JAPANESE_RE = /[一-龯々〆ヵヶぁ-ゖゝゞァ-ヴー]/
+    BOUNDARY = :__BOUNDARY__
 
     def self.to_hira(text, timeout: 5, retries: 2, backoff: 0.5, user_agent: USER_AGENT)
       raise ArgumentError, "text must be a String" unless text.is_a?(String)
 
+      # Fast-path for kana inputs: avoid network and normalize locally
+      if text.match?(/\A[ぁ-ゖーゝゞ]+\z/)
+        return text
+      elsif text.match?(/\A[ァ-ヴーヽヾヵヶ]+\z/)
+        return katakana_to_hiragana(text)
+      end
+
       body = fetch_page(text, timeout: timeout, retries: retries, backoff: backoff, user_agent: user_agent)
-      parse_hiragana(body)
+      hira = parse_hiragana(body)
+      # Ensure result is normalized to hiragana only (remote may mix katakana like 固有名詞)
+      katakana_to_hiragana(hira)
     end
 
     def self.to_kata(text, **)
@@ -31,35 +45,18 @@ module Kanji
       hiragana_to_romaji(hira)
     end
 
-    def self.to_slug(text, **opts)
-      sep       = opts.fetch(:separator, "-")
+    def self.to_slug(text, separator: "-", **opts)
+      sep       = separator
       downcase  = opts.fetch(:downcase, true)
       collapse  = opts.fetch(:collapse, true)
-      segmenter = opts.fetch(:segmenter, :tiny)
       net_opts  = slice_opts(opts, :timeout, :retries, :backoff, :user_agent)
 
-      s = case segmenter
-          when :tiny
-            tokens = segment_with_tiny(text)
-            parts = tokens.filter_map { |tok| normalize_slug_part(tok, net_opts) }
-            parts.join(sep)
-          when :space
-            tokens = segment_with_space(text)
-            parts = tokens.filter_map { |tok| normalize_slug_part(tok, net_opts) }
-            parts.join(sep)
-          else
-            roma = to_roma(text, **net_opts)
-            roma.dup
-          end
+      tokens = segment_with_tiny(text)
+      raw_parts = tokens.filter_map { |tok| normalize_slug_part(tok, net_opts) }
+      parts = merge_ascii_parts(raw_parts)
+      s = parts.join(sep)
 
-      s = s.downcase if downcase
-      # Replace non-alphanumeric with separator
-      s = s.gsub(/[^a-z0-9]+/, sep)
-      # Collapse duplicate separators
-      s = s.gsub(/#{Regexp.escape(sep)}{2,}/, sep) if collapse && !sep.empty?
-      # Trim leading/trailing separators
-      s = s.gsub(/^#{Regexp.escape(sep)}|#{Regexp.escape(sep)}$/, "") unless sep.empty?
-      s
+      normalize_slug_string(s, sep: sep, downcase: downcase, collapse: collapse)
     end
 
     def self.fetch_page(text, timeout:, retries:, backoff:, user_agent: USER_AGENT)
@@ -122,6 +119,10 @@ module Kanji
 
     def self.hiragana_to_katakana(hira)
       hira.tr("ぁ-ゔゝゞー", "ァ-ヴヽヾー")
+    end
+
+    def self.katakana_to_hiragana(kata)
+      kata.tr("ァ-ヴヽヾヵヶー", "ぁ-ゔゝゞかけー")
     end
 
     DIGRAPHS = {
@@ -214,30 +215,81 @@ module Kanji
 
     def self.segment_with_tiny(text)
       require "tiny_segmenter"
-      TinySegmenter.new.segment(text)
+      seg = TinySegmenter.new
+      tokens = []
+      i = 0
+      while i < text.length
+        ch = text[i]
+        if ch =~ ASCII_RE
+          j = i + 1
+          j += 1 while j < text.length && text[j] =~ ASCII_RE
+          tokens << text[i...j]
+          i = j
+        elsif ch =~ SPACE_RE
+          # treat whitespace (incl. IDEOGRAPHIC SPACE) as a hard boundary
+          tokens << BOUNDARY unless tokens.last == BOUNDARY
+          i += 1
+        else
+          # collect contiguous non-ASCII-non-space and segment via TinySegmenter
+          j = i + 1
+          j += 1 while j < text.length && text[j] !~ /[A-Za-z0-9\s\u3000]/
+          chunk = text[i...j]
+          tokens.concat(seg.segment(chunk))
+          i = j
+        end
+      end
+      tokens
     rescue LoadError
       raise Error, "tiny_segmenter gem is not installed. Add `tiny_segmenter` or omit segmenter option."
     end
 
     def self.japanese_token?(tok)
       # Kanji, Kana, prolonged sound mark, iteration marks, small kana
-      !!(tok =~ /[一-龯々〆ヵヶぁ-ゖゝゞァ-ヴー]/)
-    end
-
-    def self.segment_with_space(text)
-      text.split(/\s+/)
+      !!(tok =~ JAPANESE_RE)
     end
 
     def self.normalize_slug_part(tok, net_opts)
-      if japanese_token?(tok)
-        to_roma(tok, **net_opts)
-      elsif tok =~ /[A-Za-z0-9]+/
-        tok
+      if tok == BOUNDARY
+        { type: :boundary, text: nil }
+      elsif japanese_token?(tok)
+        { type: :j, text: to_roma(tok, **net_opts) }
+      elsif tok =~ ASCII_RE
+        { type: :ascii, text: tok }
       end
+    end
+
+    def self.merge_ascii_parts(parts)
+      merged = []
+      parts.each do |p|
+        if p[:type] == :boundary
+          merged << p
+        elsif !merged.empty? && merged.last[:type] == :ascii && p[:type] == :ascii
+          merged.last[:text] << p[:text]
+        else
+          merged << { type: p[:type], text: p[:text].dup }
+        end
+      end
+      merged.reject { |p| p[:type] == :boundary }.map { |p| p[:text] }
+    end
+
+    def self.normalize_slug_string(str, sep:, downcase:, collapse:)
+      s = str
+      s = s.downcase if downcase
+      # Replace non-alphanumeric with separator
+      s = s.gsub(NON_ALNUM_RE, sep)
+      # Collapse duplicate separators
+      s = s.gsub(/#{Regexp.escape(sep)}{2,}/, sep) if collapse && !sep.empty?
+      # Trim leading/trailing separators
+      s = s.gsub(/^#{Regexp.escape(sep)}|#{Regexp.escape(sep)}$/, "") unless sep.empty?
+      s
     end
 
     def self.slice_opts(hash, *keys)
       hash.slice(*keys)
     end
+
+    private_class_method :segment_with_tiny, :japanese_token?, :normalize_slug_part, :merge_ascii_parts,
+                         :normalize_slug_string, :slice_opts, :backoff_for, :katakana_to_hiragana,
+                         :hiragana_to_katakana
   end
 end
